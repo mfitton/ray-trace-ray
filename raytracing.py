@@ -24,9 +24,11 @@ SOFTWARE.
 
 import numpy as np
 import matplotlib.pyplot as plt
+import ray
 
-w = 400
-h = 300
+ray.init()
+w = 1200
+h = 900
 
 def normalize(x):
     x /= np.linalg.norm(x)
@@ -146,7 +148,6 @@ specular_c = 1.
 specular_k = 50
 
 depth_max = 5  # Maximum number of light reflections.
-col = np.zeros(3)  # Current color.
 O = np.array([0., 0.35, -1.])  # Camera.
 Q = np.array([0., 0., 0.])  # Camera pointing to.
 img = np.zeros((h, w, 3))
@@ -155,26 +156,38 @@ r = float(w) / h
 # Screen coordinates: x0, y0, x1, y1.
 S = (-1., -1. / r + .25, 1., 1. / r + .25)
 
+@ray.remote
+def trace_ray_with_bounces(x, y):
+    Q[:2] = (x, y)
+    col = np.zeros(3)
+    D = normalize(Q - O)
+    depth = 0
+    rayO, rayD = O, D
+    reflection = 1.
+    # Loop through initial and secondary rays.
+    while depth < depth_max:
+        traced = trace_ray(rayO, rayD)
+        if not traced:
+            break
+        obj, M, N, col_ray = traced
+        # Reflection: create a new ray.
+        rayO, rayD = M + N * .0001, normalize(rayD - 2 * np.dot(rayD, N) * N)
+        depth += 1
+        col += reflection * col_ray
+        reflection *= obj.get('reflection', 1.)
+    return np.clip(col, 0, 1)
+
+
 # Loop through all pixels.
+results = []
+coords = []
 for i, x in enumerate(np.linspace(S[0], S[2], w)):
     for j, y in enumerate(np.linspace(S[1], S[3], h)):
-        col[:] = 0
-        Q[:2] = (x, y)
-        D = normalize(Q - O)
-        depth = 0
-        rayO, rayD = O, D
-        reflection = 1.
-        # Loop through initial and secondary rays.
-        while depth < depth_max:
-            traced = trace_ray(rayO, rayD)
-            if not traced:
-                break
-            obj, M, N, col_ray = traced
-            # Reflection: create a new ray.
-            rayO, rayD = M + N * .0001, normalize(rayD - 2 * np.dot(rayD, N) * N)
-            depth += 1
-            col += reflection * col_ray
-            reflection *= obj.get('reflection', 1.)
-        img[h - j - 1, i, :] = np.clip(col, 0, 1)
+        results.append(trace_ray_with_bounces.remote(x, y))
+        coords.append((i, j))
+
+for coord, result in zip(coords, ray.get(results)):
+    i, j = coord
+    img[h - j - 1, i, :] = result
 
 plt.imsave('fig.png', img)
