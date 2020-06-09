@@ -24,9 +24,12 @@ SOFTWARE.
 
 import numpy as np
 import matplotlib.pyplot as plt
+from itertools import chain
 import ray
+from os import getenv
 
 ray.init()
+CHUNK_SIZE = int(getenv('CHUNK_SIZE', 100))
 w = 1200
 h = 900
 
@@ -157,36 +160,47 @@ r = float(w) / h
 S = (-1., -1. / r + .25, 1., 1. / r + .25)
 
 @ray.remote
-def trace_ray_with_bounces(x, y):
-    Q[:2] = (x, y)
-    col = np.zeros(3)
-    D = normalize(Q - O)
-    depth = 0
-    rayO, rayD = O, D
-    reflection = 1.
-    # Loop through initial and secondary rays.
-    while depth < depth_max:
-        traced = trace_ray(rayO, rayD)
-        if not traced:
-            break
-        obj, M, N, col_ray = traced
-        # Reflection: create a new ray.
-        rayO, rayD = M + N * .0001, normalize(rayD - 2 * np.dot(rayD, N) * N)
-        depth += 1
-        col += reflection * col_ray
-        reflection *= obj.get('reflection', 1.)
-    return np.clip(col, 0, 1)
+def trace_rays_with_bounces(xys):
+    results = []
+    for (x, y) in xys:
+        Q[:2] = (x, y)
+        col = np.zeros(3)
+        D = normalize(Q - O)
+        depth = 0
+        rayO, rayD = O, D
+        reflection = 1.
+        # Loop through initial and secondary rays.
+        while depth < depth_max:
+            traced = trace_ray(rayO, rayD)
+            if not traced:
+                break
+            obj, M, N, col_ray = traced
+            # Reflection: create a new ray.
+            rayO, rayD = M + N * .0001, normalize(rayD - 2 * np.dot(rayD, N) * N)
+            depth += 1
+            col += reflection * col_ray
+            reflection *= obj.get('reflection', 1.)
+        results.append(np.clip(col, 0, 1))
+    return results
 
 
 # Loop through all pixels.
 results = []
 coords = []
+next_task_xys = []
 for i, x in enumerate(np.linspace(S[0], S[2], w)):
     for j, y in enumerate(np.linspace(S[1], S[3], h)):
-        results.append(trace_ray_with_bounces.remote(x, y))
         coords.append((i, j))
+        next_task_xys.append((x, y))
+        if len(next_task_xys) == CHUNK_SIZE:
+            results.append(trace_rays_with_bounces.remote(next_task_xys))
+            next_task_xys = []
+if next_task_xys:
+    results.append(trace_rays_with_bounces.remote(next_task_xys))
 
-for coord, result in zip(coords, ray.get(results)):
+
+flat_results = chain.from_iterable(ray.get(results))
+for coord, result in zip(coords, flat_results):
     i, j = coord
     img[h - j - 1, i, :] = result
 
